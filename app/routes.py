@@ -3,11 +3,35 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from flask import render_template, redirect, url_for
+from flask import render_template, redirect, url_for, flash
+from flask_login import login_user
 
 from app import app, db
-from app.forms import NewBookmarkForm
-from app.models import Bookmark
+from app.forms import NewBookmarkForm, DeleteBookmarkForm, LoginForm
+from app.models import Bookmark, User
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(username=form.username.data).first()
+        if user and user.password == form.password.data:
+            login_user(user)
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid username or password')
+    return render_template('login.html', form=form)
+
+
+@app.route('/delete/<int:bookmark_id>', methods=['POST'])
+def delete_bookmark(bookmark_id):
+    form = DeleteBookmarkForm()
+    if form.validate_on_submit():
+        bookmark = Bookmark.query.get_or_404(bookmark_id)
+        db.session.delete(bookmark)
+        db.session.commit()
+    return redirect(url_for('index'))
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -22,7 +46,9 @@ def index():
         db.session.commit()
         return redirect(url_for('index'))
     bookmarks = Bookmark.query.order_by(Bookmark.timestamp.desc()).all()
-    return render_template('index.html', form=form, bookmarks=bookmarks)
+
+    delete_form = DeleteBookmarkForm()
+    return render_template('index.html', form=form, bookmarks=bookmarks, delete_form=delete_form)
 
 
 def extract_title_description(url):
@@ -37,33 +63,95 @@ def extract_title_description(url):
 
         return title or url, description or 'No Description'
     except Exception as e:
-        print('0', e)
         return url, 'No Description'
 
 
 def _extract_title(soup):
     try:
-        title_tag = soup.find('shreddit-title')
-        if title_tag and 'title' in title_tag.attrs:
-            return title_tag['title'].strip()
+        # Custom tag 'shreddit-title' for Reddit
+        reddit_title = soup.find('shreddit-title')
+        if reddit_title:
+            return reddit_title['title'].strip()
+
+        # Standard HTML title tag
         title_tag = soup.find('title')
         if title_tag:
             return title_tag.get_text(strip=True)
+
+        # Open Graph title
+        og_title = soup.find('meta', attrs={'property': 'og:title', 'content': True})
+        if og_title:
+            return og_title['content'].strip()
+
+        # Twitter-specific title
+        twitter_title = soup.find('meta', attrs={'name': 'twitter:title', 'content': True})
+        if twitter_title:
+            return twitter_title['content'].strip()
+
+        # Schema.org title
+        schema_title = soup.find('meta', attrs={'itemprop': 'name', 'content': True})
+        if schema_title:
+            return schema_title['content'].strip()
+
+        # HTML5 microdata
+        microdata_title = soup.find(attrs={'itemprop': 'headline'})
+        if microdata_title:
+            return microdata_title.get_text(strip=True)
+
+        # Dublin Core title
+        dc_title = soup.find('meta', attrs={'name': 'DC.title', 'content': True})
+        if dc_title:
+            return dc_title['content'].strip()
+
+        # h1 tags
+        h1_title = soup.find('h1')
+        if h1_title:
+            return h1_title.get_text(strip=True)
+
+        # Alternative meta tag for title
+        alt_meta_title = soup.find('meta', attrs={'name': 'title', 'content': True})
+        if alt_meta_title:
+            return alt_meta_title['content'].strip()
+
+        # Fallback to None if no title is found
         return None
     except Exception as e:
-        print('1', e)
         return None
 
 
 def _extract_description(soup):
     try:
+        # Standard meta tag with name='description'
         description_tag = soup.find('meta', attrs={'name': 'description'})
-        if description_tag and 'content' in description_tag.attrs:
-            description = description_tag['content'].strip()
-            return description
+        if description_tag:
+            return description_tag['content'].strip()
+
+        # Open Graph description
+        og_description = soup.find('meta', attrs={'property': 'og:description'})
+        if og_description:
+            return og_description['content'].strip()
+
+        # Twitter card description
+        twitter_description = soup.find('meta', attrs={'name': 'twitter:description'})
+        if twitter_description:
+            return twitter_description['content'].strip()
+
+        # Additional meta tag checks
+        additional_meta_tags = ['og:title', 'twitter:title', 'keywords']
+        for tag in additional_meta_tags:
+            result = soup.find('meta', attrs={'property': tag, 'name': tag})
+            if result:
+                return result['content'].strip()
+
+        # HTML tags like p or div with specific IDs or classes (this is highly specific to the website)
+        html_tags = [('p', 'description'), ('div', 'description'), ('section', 'description')]
+        for tag, class_name in html_tags:
+            result = soup.find(tag, {'class': class_name})
+            if result:
+                return result.get_text().strip()
+
         return None
     except Exception as e:
-        print('2', e)
         return None
 
 

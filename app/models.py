@@ -1,32 +1,49 @@
-from datetime import datetime
+from datetime import datetime, UTC
 
-from flask_login import UserMixin
-
-from app import db, login
+from app import db
 
 
-class Bookmark(db.Model):
+def utcnow():
+    return datetime.now(UTC)
+
+
+class LinkTag(db.Model):
+    __tablename__ = "link_tags"
+    timestamp = db.Column(db.DateTime, index=True, default=utcnow)
+
+    link_id = db.Column(db.Integer, db.ForeignKey("links.id"), primary_key=True)
+    tag_id = db.Column(db.String(64), db.ForeignKey("tags.id"), primary_key=True)
+
+
+class Link(db.Model):
+    __tablename__ = 'links'
+
     id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, index=True, default=utcnow)
 
-    url = db.Column(db.String(200), nullable=False)
-    domain = db.Column(db.String(100), nullable=False)
+    url = db.Column(db.String(256), nullable=False)
+    domain = db.Column(db.String(128), nullable=False)
 
-    title = db.Column(db.String(200), nullable=False)
+    title = db.Column(db.String(256), nullable=False)
     description = db.Column(db.Text)
 
-    def __repr__(self):
-        return f'<Bookmark {self.url}>'
+    link_tags = db.relationship("LinkTag",
+                                foreign_keys=[LinkTag.link_id],
+                                backref=db.backref("link", lazy="joined"),
+                                lazy="dynamic",
+                                cascade="all, delete-orphan")
 
 
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(100), unique=True)
-    password = db.Column(db.String(100))
+class Tag(db.Model):
+    __tablename__ = "tags"
 
-    # other fields as needed
+    id = db.Column(db.String(64), primary_key=True)
+    timestamp = db.Column(db.DateTime, index=True, default=utcnow)
 
-    # User loader
-    @login.user_loader
-    def load_user(id):
-        return User.query.get(int(id))
+    name = db.Column(db.String(64), nullable=False)
+
+    link_tags = db.relationship("LinkTag",
+                                foreign_keys=[LinkTag.tag_id],
+                                backref=db.backref("tag", lazy="joined"),
+                                lazy="dynamic",
+                                cascade="all, delete-orphan")

@@ -1,54 +1,108 @@
+import json
+import re
 from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from flask import render_template, redirect, url_for, flash
-from flask_login import login_user
+from flask import render_template, redirect, url_for, request
+from openai import OpenAI
+from sqlalchemy import func, distinct, not_, desc
 
 from app import app, db
-from app.forms import NewBookmarkForm, DeleteBookmarkForm, LoginForm
-from app.models import Bookmark, User
+from app.forms import NewLinkForm, DeleteLinkForm
+from app.models import Link, Tag, LinkTag
 
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    form = LoginForm()
+@app.route('/delete/<int:link_id>', methods=['POST'])
+def delete_link(link_id):
+    form = DeleteLinkForm()
     if form.validate_on_submit():
-        user = User.query.filter_by(username=form.username.data).first()
-        if user and user.password == form.password.data:
-            login_user(user)
-            return redirect(url_for('index'))
-        else:
-            flash('Invalid username or password')
-    return render_template('login.html', form=form)
-
-
-@app.route('/delete/<int:bookmark_id>', methods=['POST'])
-def delete_bookmark(bookmark_id):
-    form = DeleteBookmarkForm()
-    if form.validate_on_submit():
-        bookmark = Bookmark.query.get_or_404(bookmark_id)
-        db.session.delete(bookmark)
+        link = Link.query.get_or_404(link_id)
+        db.session.delete(link)
         db.session.commit()
     return redirect(url_for('index'))
 
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    form = NewBookmarkForm()
+    tags = re.findall(r'\w+', request.args.get("tags", ""))
+    seen = set()
+    tag_ids_to_filter = [tag.lower() for tag in tags if not (tag.lower() in seen or seen.add(tag.lower()))]
+    if tag_ids_to_filter:
+        link_query = Link.query.join(
+            LinkTag, LinkTag.link_id == Link.id
+        ).filter(
+            LinkTag.tag_id.in_(tag_ids_to_filter)
+        ).group_by(
+            Link
+        ).having(
+            func.count(distinct(LinkTag.tag_id)) == len(tag_ids_to_filter)
+        ).order_by(Link.timestamp.desc())
+        tags_in_filter = Tag.query.filter(Tag.id.in_(tag_ids_to_filter)).all()
+    else:
+        link_query = Link.query.order_by(Link.timestamp.desc())
+        tags_in_filter = []
+
+    link_subquery = link_query.subquery()
+    tags_not_in_filter = db.session.query(
+        Tag,
+        func.count(LinkTag.link_id).label('link_tag_count')
+    ).join(
+        LinkTag,
+        LinkTag.tag_id == Tag.id
+    ).join(
+        link_subquery,
+        link_subquery.c.id == LinkTag.link_id
+    ).filter(
+        not_(Tag.id.in_(tag_ids_to_filter))
+    ).group_by(
+        Tag
+    ).order_by(
+        desc('link_tag_count')
+    ).all()
+
+    form = NewLinkForm()
     if form.validate_on_submit():
         url = form.url.data
         title, description = extract_title_description(url)
         domain = extract_domain(url)
-        bookmark = Bookmark(url=url, title=title, description=description, domain=domain)
-        db.session.add(bookmark)
+
+        link = Link(url=url, title=title, description=description, domain=domain)
+        db.session.add(link)
+        tag_names = generate_tags(url, title, description)
+        add_tags(link, tag_names)
+
         db.session.commit()
         return redirect(url_for('index'))
-    bookmarks = Bookmark.query.order_by(Bookmark.timestamp.desc()).all()
+    links = link_query.all()
 
-    delete_form = DeleteBookmarkForm()
-    return render_template('index.html', form=form, bookmarks=bookmarks, delete_form=delete_form)
+    delete_form = DeleteLinkForm()
+
+    return render_template(
+        'index.html',
+        form=form,
+        links=links,
+        delete_form=delete_form,
+        tags_in_filter=tags_in_filter,
+        tags_not_in_filter=tags_not_in_filter
+    )
+
+
+def _add_tag(link, tag_name):
+    tag = Tag.query.get(tag_name.lower())
+    if tag is None:
+        tag = Tag(id=tag_name.lower(), name=tag_name)
+        db.session.add(tag)
+    link_tag = link.link_tags.filter_by(tag=tag).first()
+    if link_tag is None:
+        link_tag = LinkTag(link=link, tag=tag)
+        db.session.add(link_tag)
+
+
+def add_tags(link, tag_names):
+    for tag_name in tag_names:
+        _add_tag(link, tag_name)
 
 
 def extract_title_description(url):
@@ -121,11 +175,6 @@ def _extract_title(soup):
 
 def _extract_description(soup):
     try:
-        # Standard meta tag with name='description'
-        description_tag = soup.find('meta', attrs={'name': 'description'})
-        if description_tag:
-            return description_tag['content'].strip()
-
         # Open Graph description
         og_description = soup.find('meta', attrs={'property': 'og:description'})
         if og_description:
@@ -135,6 +184,11 @@ def _extract_description(soup):
         twitter_description = soup.find('meta', attrs={'name': 'twitter:description'})
         if twitter_description:
             return twitter_description['content'].strip()
+
+        # Standard meta tag with name='description'
+        description_tag = soup.find('meta', attrs={'name': 'description'})
+        if description_tag:
+            return description_tag['content'].strip()
 
         # Additional meta tag checks
         additional_meta_tags = ['og:title', 'twitter:title', 'keywords']
@@ -162,6 +216,30 @@ def extract_domain(url):
         return domain
     except Exception as e:
         return url
+
+
+def generate_tags(url, title, description):
+    prompt = f'''
+    List 3 to 5 Reddit subreddits or online communities the below link in brackets most likely to appear in, output as
+    a JSON list with up to 5 child objects, each child object has exactly 2 properties 'name' and 'probability',
+    leave out the prefix "r/" if present
+    JSON example:
+    (
+    URL: {url}
+    Title: {title}
+    Description: {description}
+    )
+    '''
+    client = OpenAI()
+
+    messages = [{"role": "user", "content": prompt}]
+    response = client.chat.completions.create(
+        model='gpt-3.5-turbo',
+        messages=messages,
+        temperature=0,  # this is the degree of randomness of the model's output
+    )
+    response_text = response.choices[0].message.content
+    return [x['name'] for x in json.loads(response_text) if x['probability'] >= 0]
 
 
 @app.template_filter('format_time')

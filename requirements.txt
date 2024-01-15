@@ -4,9 +4,3 @@ Flask-SQLAlchemy
 beautifulsoup4
 requests
 WTForms
-Flask-Login
-llama-index
-setuptools
-html2text
-selenium
-webdriver-manager

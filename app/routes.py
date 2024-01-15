@@ -107,7 +107,10 @@ def add_tags(link, tag_names):
 
 def extract_title_description(url):
     try:
-        response = requests.get(url)
+        headers = {
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        }
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -222,8 +225,7 @@ def generate_tags(url, title, description):
     prompt = f'''
     List 3 to 5 Reddit subreddits or online communities the below link in brackets most likely to appear in, output as
     a JSON list with up to 5 child objects, each child object has exactly 2 properties 'name' and 'probability',
-    leave out the prefix "r/" if present
-    JSON example:
+    do not include the prefix "r/"
     (
     URL: {url}
     Title: {title}
